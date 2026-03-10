@@ -56,14 +56,12 @@ Files like `package.json`, `docker-compose.yml`, `.env.example`, and generated c
 # In manifest.yaml
 structured:
   npm_dependencies:
-    whatsapp-web.js: "^2.1.0"
-    qrcode-terminal: "^0.12.0"
+    discord.js: "^14.0.0"
   env_additions:
-    - WHATSAPP_TOKEN
-    - WHATSAPP_VERIFY_TOKEN
-    - WHATSAPP_PHONE_ID
+    - DISCORD_BOT_TOKEN
+    - DISCORD_CLIENT_ID
   docker_compose_services:
-    whatsapp-redis:
+    discord-redis:
       image: redis:alpine
       ports: ["6380:6379"]
 ```
@@ -101,27 +99,27 @@ A skill contains only the files it adds or modifies. For modified code files, th
 
 ```
 skills/
-  add-whatsapp/
+  add-discord/
     SKILL.md                          # Context, intent, what this skill does and why
     manifest.yaml                     # Metadata, dependencies, env vars, post-apply steps
     tests/                            # Integration tests for this skill
-      whatsapp.test.ts
+      discord.test.ts
     add/                              # New files — copied directly
-      src/channels/whatsapp.ts
-      src/channels/whatsapp.config.ts
+      src/channels/discord.ts
+      src/channels/discord.config.ts
     modify/                           # Modified code files — merged via git merge-file
       src/
-        server.ts                     # Full file: clean core + whatsapp changes
-        server.ts.intent.md           # "Adds WhatsApp webhook route and message handler"
-        config.ts                     # Full file: clean core + whatsapp config options
-        config.ts.intent.md           # "Adds WhatsApp channel configuration block"
+        server.ts                     # Full file: clean core + discord changes
+        server.ts.intent.md           # "Adds Discord gateway connection and message handler"
+        config.ts                     # Full file: clean core + discord config options
+        config.ts.intent.md           # "Adds Discord channel configuration block"
 ```
 
 ### Why Full Modified Files
 
 - `git merge-file` requires three full files — no intermediate reconstruction step
 - Git's three-way merge uses context matching, so it works even if the user has moved code around — unlike line-number-based diffs that break immediately
-- Auditable: `diff .nanoclaw/base/src/server.ts skills/add-whatsapp/modify/src/server.ts` shows exactly what the skill changes
+- Auditable: `diff .nanoclaw/base/src/server.ts skills/add-discord/modify/src/server.ts` shows exactly what the skill changes
 - Deterministic: same three inputs always produce the same merge result
 - Size is negligible since NanoClaw's core files are small
 
@@ -133,19 +131,19 @@ Each modified code file has a corresponding `.intent.md` with structured heading
 # Intent: server.ts modifications
 
 ## What this skill adds
-Adds WhatsApp webhook route and message handler to the Express server.
+Adds Discord gateway connection and message handler to the server.
 
 ## Key sections
-- Route registration at `/webhook/whatsapp` (POST and GET for verification)
+- Bot gateway connection and event listeners
 - Message handler middleware between auth and response pipeline
 
 ## Invariants
-- Must not interfere with other channel webhook routes
-- Auth middleware must run before the WhatsApp handler
+- Must not interfere with other channel message handlers
+- Auth middleware must run before the Discord handler
 - Error handling must propagate to the global error handler
 
 ## Must-keep sections
-- The webhook verification flow (GET route) is required by WhatsApp Cloud API
+- The gateway reconnection logic is required for reliable Discord operation
 ```
 
 Structured headings (What, Key sections, Invariants, Must-keep) give Claude Code specific guidance during conflict resolution instead of requiring it to infer from unstructured text.
@@ -154,15 +152,15 @@ Structured headings (What, Key sections, Invariants, Must-keep) give Claude Code
 
 ```yaml
 # --- Required fields ---
-skill: whatsapp
+skill: discord
 version: 1.2.0
-description: "WhatsApp Business API integration via Cloud API"
+description: "Discord bot integration via Gateway API"
 core_version: 0.1.0               # The core version this skill was authored against
 
 # Files this skill adds
 adds:
-  - src/channels/whatsapp.ts
-  - src/channels/whatsapp.config.ts
+  - src/channels/discord.ts
+  - src/channels/discord.config.ts
 
 # Code files this skill modifies (three-way merge)
 modifies:
@@ -175,10 +173,9 @@ file_ops: []
 # Structured operations (deterministic, no merge — implicit handling)
 structured:
   npm_dependencies:
-    whatsapp-web.js: "^2.1.0"
-    qrcode-terminal: "^0.12.0"
+    discord.js: "^14.0.0"
   env_additions:
-    - WHATSAPP_TOKEN
+    - DISCORD_BOT_TOKEN
     - WHATSAPP_VERIFY_TOKEN
     - WHATSAPP_PHONE_ID
 
@@ -187,7 +184,7 @@ conflicts: []              # Skills that cannot coexist without agent resolution
 depends: []                # Skills that must be applied first
 
 # Test command — runs after apply to validate the skill works
-test: "npx vitest run src/channels/whatsapp.test.ts"
+test: "npx vitest run src/channels/discord.test.ts"
 
 # --- Future fields (not yet implemented in v0.1) ---
 # author: nanoclaw-team
@@ -332,7 +329,7 @@ Execute renames, deletes, or moves with safety checks. Apply path remapping if n
 ### Step 4: Apply New Files
 
 ```bash
-cp skills/add-whatsapp/add/src/channels/whatsapp.ts src/channels/whatsapp.ts
+cp skills/add-discord/add/src/channels/discord.ts src/channels/discord.ts
 ```
 
 ### Step 5: Merge Modified Code Files
@@ -340,7 +337,7 @@ cp skills/add-whatsapp/add/src/channels/whatsapp.ts src/channels/whatsapp.ts
 For each file in `modifies` (with path remapping applied):
 
 ```bash
-git merge-file src/server.ts .nanoclaw/base/src/server.ts skills/add-whatsapp/modify/src/server.ts
+git merge-file src/server.ts .nanoclaw/base/src/server.ts skills/add-discord/modify/src/server.ts
 ```
 
 - **Exit code 0**: clean merge, move on
@@ -391,7 +388,7 @@ NanoClaw maintains a verified resolution cache in `.nanoclaw/resolutions/` that 
 ```
 .nanoclaw/
   resolutions/
-    whatsapp@1.2.0+telegram@1.0.0/
+    discord@1.2.0+telegram@1.0.0/
       src/
         server.ts.resolution
         server.ts.preimage
@@ -407,9 +404,9 @@ A cached resolution is **only applied if input hashes match exactly**:
 ```yaml
 # meta.yaml
 skills:
-  - whatsapp@1.2.0
+  - discord@1.2.0
   - telegram@1.0.0
-apply_order: [whatsapp, telegram]
+apply_order: [discord, telegram]
 core_version: 0.6.0
 resolved_at: 2026-02-15T10:00:00Z
 tested: true
@@ -417,7 +414,7 @@ test_passed: true
 resolution_source: maintainer
 input_hashes:
   base: "aaa..."
-  current_after_whatsapp: "bbb..."
+  current_after_discord: "bbb..."
   telegram_modified: "ccc..."
 output_hash: "ddd..."
 ```
@@ -438,14 +435,14 @@ After `git merge-file` produces a conflict, the system must create the index sta
 
 ```bash
 # 1. Run the merge (produces conflict markers in the working tree)
-git merge-file current.ts .nanoclaw/base/src/file.ts skills/add-whatsapp/modify/src/file.ts
+git merge-file current.ts .nanoclaw/base/src/file.ts skills/add-discord/modify/src/file.ts
 
 # 2. If exit code > 0 (conflict), set up rerere adapter:
 
 # Create blob objects for the three versions
 base_hash=$(git hash-object -w .nanoclaw/base/src/file.ts)
 ours_hash=$(git hash-object -w skills/previous-skill/modify/src/file.ts)  # or the pre-merge current
-theirs_hash=$(git hash-object -w skills/add-whatsapp/modify/src/file.ts)
+theirs_hash=$(git hash-object -w skills/add-discord/modify/src/file.ts)
 
 # Create unmerged index entries at stages 1 (base), 2 (ours), 3 (theirs)
 printf '100644 %s 1\tsrc/file.ts\0' "$base_hash" | git update-index --index-info
@@ -608,8 +605,8 @@ An append-only file in the repo root. Each entry records a breaking change and t
   description: "Preserves Apple Containers (default changed to Docker in 0.6)"
 
 - since: 0.7.0
-  skill: add-whatsapp@2.0.0
-  description: "Preserves WhatsApp (moved from core to skill in 0.7)"
+  skill: add-discord@2.0.0
+  description: "Preserves Discord (moved from core to skill in 0.7)"
 
 - since: 0.8.0
   skill: legacy-auth@1.0.0
@@ -647,7 +644,7 @@ Core updated: 0.5.0 → 0.8.0
 
   Preserving your current setup:
     + apple-containers@1.0.0
-    + add-whatsapp@2.0.0
+    + add-discord@2.0.0
     + legacy-auth@1.0.0
 
   Skill updates:
@@ -723,7 +720,7 @@ Update available: 0.5.0 → 0.8.0 (12 commits)
 
   Migrations (auto-applied to preserve your setup):
     + apple-containers@1.0.0 (container default changed to Docker)
-    + add-whatsapp@2.0.0 (WhatsApp moved from core to skill)
+    + add-discord@2.0.0 (Discord moved from core to skill)
 
   Skill updates:
     add-telegram 1.0.0 → 1.2.0
@@ -803,7 +800,7 @@ Core updated: 0.5.0 → 0.8.0
 
   Migrations:
     + apple-containers@1.0.0 (preserves container runtime)
-    + add-whatsapp@2.0.0 (WhatsApp moved to skill)
+    + add-discord@2.0.0 (Discord moved to skill)
 
   Skill updates:
     ✓ add-telegram 1.0.0 → 1.2.0 (new features applied)
@@ -939,9 +936,9 @@ Each skill includes integration tests that validate the skill works correctly wh
 
 ```
 skills/
-  add-whatsapp/
+  add-discord/
     tests/
-      whatsapp.test.ts
+      discord.test.ts
 ```
 
 ### What Tests Validate
@@ -997,16 +994,16 @@ project/
     server.ts
     config.ts
     channels/
-      whatsapp.ts
+      discord.ts
       telegram.ts
   skills/                           # Skill packages (Claude Code slash commands)
-    add-whatsapp/
+    add-discord/
       SKILL.md
       manifest.yaml
       tests/
-        whatsapp.test.ts
+        discord.test.ts
       add/
-        src/channels/whatsapp.ts
+        src/channels/discord.ts
       modify/
         src/
           server.ts
@@ -1030,7 +1027,7 @@ project/
       001-logging-middleware.patch
       001-logging-middleware.md
     resolutions/                    # Shared verified resolution cache
-      whatsapp@1.2.0+telegram@1.0.0/
+      discord@1.2.0+telegram@1.0.0/
         src/
           server.ts.resolution
           server.ts.preimage

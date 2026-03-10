@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 import {
   _initTestDatabase,
+  _purgeWhatsAppStateForTests,
   createTask,
   deleteTask,
   getAllChats,
@@ -15,6 +16,37 @@ import {
 
 beforeEach(() => {
   _initTestDatabase();
+});
+
+describe('WhatsApp purge migration', () => {
+  it('removes legacy WhatsApp rows and keeps Telegram state', () => {
+    storeChatMetadata('tg:-1001', '2024-01-01T00:00:01.000Z', 'Telegram', 'telegram', true);
+    storeChatMetadata('legacy@g.us', '2024-01-01T00:00:02.000Z', 'Legacy', 'whatsapp', true);
+    storeMessage({
+      id: 'tg-msg',
+      chat_jid: 'tg:-1001',
+      sender: '123',
+      sender_name: 'Alice',
+      content: 'telegram',
+      timestamp: '2024-01-01T00:00:03.000Z',
+    });
+    storeMessage({
+      id: 'wa-msg',
+      chat_jid: 'legacy@g.us',
+      sender: '123@s.whatsapp.net',
+      sender_name: 'Bob',
+      content: 'legacy',
+      timestamp: '2024-01-01T00:00:04.000Z',
+    });
+
+    _purgeWhatsAppStateForTests();
+
+    const chats = getAllChats();
+    expect(chats).toHaveLength(1);
+    expect(chats[0].jid).toBe('tg:-1001');
+    expect(getMessagesSince('legacy@g.us', '', 'Andy')).toHaveLength(0);
+    expect(getMessagesSince('tg:-1001', '', 'Andy')).toHaveLength(1);
+  });
 });
 
 // Helper to store a message using the normalized NewMessage interface

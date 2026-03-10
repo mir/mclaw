@@ -45,9 +45,18 @@ server.tool(
   {
     text: z.string().describe('The message text to send'),
     sender: z.string().optional().describe('Your role/identity name (e.g. "Researcher"). When set, messages appear from a dedicated bot in Telegram.'),
+    buttons: z.array(
+      z.array(
+        z.object({
+          text: z.string().describe('Button label'),
+          data: z.string().max(64).describe('Callback data (max 64 bytes)'),
+        })
+      )
+    ).optional().describe('Inline keyboard buttons (rows of buttons). Telegram only.'),
   },
   async (args) => {
-    const data: Record<string, string | undefined> = {
+    console.error(`[ipc-mcp] send_message args: ${JSON.stringify(args)}`);
+    const data: Record<string, unknown> = {
       type: 'message',
       chatJid,
       text: args.text,
@@ -56,7 +65,12 @@ server.tool(
       timestamp: new Date().toISOString(),
     };
 
-    writeIpcFile(MESSAGES_DIR, data);
+    if (args.buttons?.length) {
+      data.buttons = args.buttons;
+    }
+
+    const filename = writeIpcFile(MESSAGES_DIR, data);
+    console.error(`[ipc-mcp] wrote IPC file ${filename}, hasButtons: ${!!args.buttons}, data.buttons: ${JSON.stringify(data.buttons)}`);
 
     return { content: [{ type: 'text' as const, text: 'Message sent.' }] };
   },
@@ -246,11 +260,11 @@ server.tool(
 
 server.tool(
   'register_group',
-  `Register a new WhatsApp group so the agent can respond to messages there. Main group only.
+  `Register a new Telegram chat, group, or topic so the agent can respond there. Main group only.
 
-Use available_groups.json to find the JID for a group. The folder name should be lowercase with hyphens (e.g., "family-chat").`,
+Use available_groups.json to find a discovered Telegram JID after the bot has seen a message there. The folder name should be lowercase with hyphens (e.g., "family-chat").`,
   {
-    jid: z.string().describe('The WhatsApp JID (e.g., "120363336345536173@g.us")'),
+    jid: z.string().describe('The Telegram JID (e.g., "tg:-1001234567890" or "tg:-1001234567890:topic:7")'),
     name: z.string().describe('Display name for the group'),
     folder: z.string().describe('Folder name for group files (lowercase, hyphens, e.g., "family-chat")'),
     trigger: z.string().describe('Trigger word (e.g., "@Andy")'),

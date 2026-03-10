@@ -137,6 +137,7 @@ export function initDatabase(): void {
 
   // Migrate from JSON files if they exist
   migrateJsonState();
+  purgeWhatsAppState();
 }
 
 /** @internal - for tests only. Creates a fresh in-memory database. */
@@ -223,27 +224,6 @@ export function getAllChats(): ChatInfo[] {
 }
 
 /**
- * Get timestamp of last group metadata sync.
- */
-export function getLastGroupSync(): string | null {
-  // Store sync time in a special chat entry
-  const row = db
-    .prepare(`SELECT last_message_time FROM chats WHERE jid = '__group_sync__'`)
-    .get() as { last_message_time: string } | undefined;
-  return row?.last_message_time || null;
-}
-
-/**
- * Record that group metadata was synced.
- */
-export function setLastGroupSync(): void {
-  const now = new Date().toISOString();
-  db.prepare(
-    `INSERT OR REPLACE INTO chats (jid, name, last_message_time) VALUES ('__group_sync__', '__group_sync__', ?)`,
-  ).run(now);
-}
-
-/**
  * Store a message with full content.
  * Only call this for registered groups where message history is needed.
  */
@@ -263,7 +243,7 @@ export function storeMessage(msg: NewMessage): void {
 }
 
 /**
- * Store a message directly (for non-WhatsApp channels that don't use Baileys proto).
+ * Store a message directly for channels that already normalize inbound payloads.
  */
 export function storeMessageDirect(msg: {
   id: string;
@@ -296,21 +276,46 @@ export function getNewMessages(
 ): { messages: NewMessage[]; newTimestamp: string } {
   if (jids.length === 0) return { messages: [], newTimestamp: lastTimestamp };
 
-  const placeholders = jids.map(() => '?').join(',');
+  // Build match conditions: exact JID match + LIKE patterns for Telegram
+  // topic sub-JIDs (e.g. tg:123 also matches tg:123:topic:456)
+  const conditions: string[] = [];
+  const params: string[] = [lastTimestamp];
+  const exactJids: string[] = [];
+  const likePatterns: string[] = [];
+
+  for (const jid of jids) {
+    exactJids.push(jid);
+    if (jid.startsWith('tg:')) {
+      likePatterns.push(`${jid}:topic:%`);
+    }
+  }
+
+  if (exactJids.length > 0) {
+    conditions.push(`chat_jid IN (${exactJids.map(() => '?').join(',')})`);
+    params.push(...exactJids);
+  }
+  for (const pattern of likePatterns) {
+    conditions.push('chat_jid LIKE ?');
+    params.push(pattern);
+  }
+
+  const jidFilter = conditions.length > 0 ? `(${conditions.join(' OR ')})` : '1=0';
+
   // Filter bot messages using both the is_bot_message flag AND the content
   // prefix as a backstop for messages written before the migration ran.
   const sql = `
     SELECT id, chat_jid, sender, sender_name, content, timestamp
     FROM messages
-    WHERE timestamp > ? AND chat_jid IN (${placeholders})
+    WHERE timestamp > ? AND ${jidFilter}
       AND is_bot_message = 0 AND content NOT LIKE ?
       AND content != '' AND content IS NOT NULL
     ORDER BY timestamp
   `;
 
+  params.push(`${botPrefix}:%`);
   const rows = db
     .prepare(sql)
-    .all(lastTimestamp, ...jids, `${botPrefix}:%`) as NewMessage[];
+    .all(...params) as NewMessage[];
 
   let newTimestamp = lastTimestamp;
   for (const row of rows) {
@@ -607,6 +612,75 @@ export function getAllRegisteredGroups(): Record<string, RegisteredGroup> {
 }
 
 // --- JSON migration ---
+
+function isWhatsAppJid(jid: string): boolean {
+  return jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net');
+}
+
+function purgeWhatsAppState(): void {
+  const deletedRegisteredGroups = db
+    .prepare(
+      `DELETE FROM registered_groups
+       WHERE jid LIKE '%@g.us' OR jid LIKE '%@s.whatsapp.net'`,
+    )
+    .run().changes;
+
+  db.prepare(
+    `DELETE FROM messages
+     WHERE chat_jid LIKE '%@g.us' OR chat_jid LIKE '%@s.whatsapp.net'`,
+  ).run();
+
+  db.prepare(
+    `DELETE FROM chats
+     WHERE jid = '__group_sync__'
+        OR channel = 'whatsapp'
+        OR jid LIKE '%@g.us'
+        OR jid LIKE '%@s.whatsapp.net'`,
+  ).run();
+
+  const lastAgentTimestampRaw = getRouterState('last_agent_timestamp');
+  if (lastAgentTimestampRaw) {
+    try {
+      const parsed = JSON.parse(lastAgentTimestampRaw) as Record<string, string>;
+      const filtered = Object.fromEntries(
+        Object.entries(parsed).filter(([jid]) => !isWhatsAppJid(jid)),
+      );
+      setRouterState('last_agent_timestamp', JSON.stringify(filtered));
+    } catch {
+      setRouterState('last_agent_timestamp', JSON.stringify({}));
+    }
+  }
+
+  db.prepare(
+    `DELETE FROM sessions
+     WHERE group_folder NOT IN (SELECT folder FROM registered_groups)`,
+  ).run();
+
+  const deletedTasks = db
+    .prepare(
+      `SELECT id FROM scheduled_tasks
+       WHERE chat_jid LIKE '%@g.us' OR chat_jid LIKE '%@s.whatsapp.net'`,
+    )
+    .all() as Array<{ id: string }>;
+  for (const task of deletedTasks) {
+    deleteTask(task.id);
+  }
+
+  if (deletedRegisteredGroups > 0 || deletedTasks.length > 0) {
+    logger.info(
+      {
+        deletedRegisteredGroups,
+        deletedTasks: deletedTasks.length,
+      },
+      'Purged legacy WhatsApp state',
+    );
+  }
+}
+
+/** @internal - for tests only. */
+export function _purgeWhatsAppStateForTests(): void {
+  purgeWhatsAppState();
+}
 
 function migrateJsonState(): void {
   const migrateFile = (filename: string) => {

@@ -11,6 +11,7 @@ import {
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   DATA_DIR,
+  EXTRA_PROJECTS_DIR,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
@@ -21,9 +22,14 @@ import { logger } from './logger.js';
 import {
   CONTAINER_RUNTIME_BIN,
   readonlyMountArgs,
+  removeContainer,
   stopContainer,
 } from './container-runtime.js';
 import { validateAdditionalMounts } from './mount-security.js';
+import {
+  ContainerRunResult,
+  ContainerStreamEvent,
+} from './stream-events.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
@@ -41,12 +47,7 @@ export interface ContainerInput {
   secrets?: Record<string, string>;
 }
 
-export interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  newSessionId?: string;
-  error?: string;
-}
+export type { ContainerRunResult, ContainerStreamEvent } from './stream-events.js';
 
 interface VolumeMount {
   hostPath: string;
@@ -80,6 +81,15 @@ function buildVolumeMounts(
       containerPath: '/workspace/group',
       readonly: false,
     });
+
+    // Mount extra projects directory if configured
+    if (EXTRA_PROJECTS_DIR && fs.existsSync(EXTRA_PROJECTS_DIR)) {
+      mounts.push({
+        hostPath: EXTRA_PROJECTS_DIR,
+        containerPath: '/workspace/extra/projects',
+        readonly: false,
+      });
+    }
   } else {
     // Other groups only get their own folder
     mounts.push({
@@ -177,7 +187,7 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
+  if (fs.existsSync(agentRunnerSrc)) {
     fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
   }
   mounts.push({
@@ -213,6 +223,12 @@ function buildContainerArgs(
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
+  // Apple Container's vmnet DNS forwarding can be unreliable —
+  // explicitly set a public DNS server so the agent can reach APIs.
+  if (CONTAINER_RUNTIME_BIN === 'container') {
+    args.push('--dns', '8.8.8.8');
+  }
+
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
@@ -243,8 +259,8 @@ export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
-  onOutput?: (output: ContainerOutput) => Promise<void>,
-): Promise<ContainerOutput> {
+  onEvent?: (event: ContainerStreamEvent) => Promise<void>,
+): Promise<ContainerRunResult> {
   const startTime = Date.now();
 
   const groupDir = resolveGroupFolderPath(group.folder);
@@ -303,6 +319,7 @@ export async function runContainerAgent(
     // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
     let newSessionId: string | undefined;
+    let finalResult: string | null = null;
     let outputChain = Promise.resolve();
 
     container.stdout.on('data', (data) => {
@@ -324,7 +341,7 @@ export async function runContainerAgent(
       }
 
       // Stream-parse for output markers
-      if (onOutput) {
+      if (onEvent) {
         parseBuffer += chunk;
         let startIdx: number;
         while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
@@ -337,16 +354,17 @@ export async function runContainerAgent(
           parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
 
           try {
-            const parsed: ContainerOutput = JSON.parse(jsonStr);
-            if (parsed.newSessionId) {
-              newSessionId = parsed.newSessionId;
+            const parsed: ContainerStreamEvent = JSON.parse(jsonStr);
+            if (parsed.type === 'session_started') {
+              newSessionId = parsed.sessionId;
+            }
+            if (parsed.type === 'turn_complete') {
+              finalResult = parsed.result;
             }
             hadStreamingOutput = true;
             // Activity detected — reset the hard timeout
             resetTimeout();
-            // Call onOutput for all markers (including null results)
-            // so idle timers start even for "silent" query completions.
-            outputChain = outputChain.then(() => onOutput(parsed));
+            outputChain = outputChain.then(() => onEvent(parsed));
           } catch (err) {
             logger.warn(
               { group: group.name, error: err },
@@ -442,7 +460,7 @@ export async function runContainerAgent(
           outputChain.then(() => {
             resolve({
               status: 'success',
-              result: null,
+              result: finalResult,
               newSessionId,
             });
           });
@@ -520,6 +538,9 @@ export async function runContainerAgent(
       fs.writeFileSync(logFile, logLines.join('\n'));
       logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
+      // Remove stopped container to free virtiofs shares for next run
+      removeContainer(containerName);
+
       if (code !== 0) {
         logger.error(
           {
@@ -542,7 +563,7 @@ export async function runContainerAgent(
       }
 
       // Streaming mode: wait for output chain to settle, return completion marker
-      if (onOutput) {
+      if (onEvent) {
         outputChain.then(() => {
           logger.info(
             { group: group.name, duration, newSessionId },
@@ -550,7 +571,7 @@ export async function runContainerAgent(
           );
           resolve({
             status: 'success',
-            result: null,
+            result: finalResult,
             newSessionId,
           });
         });
@@ -574,7 +595,7 @@ export async function runContainerAgent(
           jsonLine = lines[lines.length - 1];
         }
 
-        const output: ContainerOutput = JSON.parse(jsonLine);
+        const output: ContainerRunResult = JSON.parse(jsonLine);
 
         logger.info(
           {

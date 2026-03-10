@@ -41,9 +41,10 @@ export async function run(_args: string[]): Promise<void> {
 
   // Check existing config
   const hasEnv = fs.existsSync(path.join(projectRoot, '.env'));
-
-  const authDir = path.join(projectRoot, 'store', 'auth');
-  const hasAuth = fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
+  const envContent = hasEnv
+    ? fs.readFileSync(path.join(projectRoot, '.env'), 'utf-8')
+    : '';
+  const hasTelegramBotToken = /(^|\n)\s*TELEGRAM_BOT_TOKEN=.+/m.test(envContent);
 
   let hasRegisteredGroups = false;
   // Check JSON file first (pre-migration)
@@ -73,7 +74,7 @@ export async function run(_args: string[]): Promise<void> {
       appleContainer,
       docker,
       hasEnv,
-      hasAuth,
+      hasTelegramBotToken,
       hasRegisteredGroups,
     },
     'Environment check complete',
@@ -86,7 +87,7 @@ export async function run(_args: string[]): Promise<void> {
     APPLE_CONTAINER: appleContainer,
     DOCKER: docker,
     HAS_ENV: hasEnv,
-    HAS_AUTH: hasAuth,
+    HAS_TELEGRAM_BOT_TOKEN: hasTelegramBotToken,
     HAS_REGISTERED_GROUPS: hasRegisteredGroups,
     STATUS: 'success',
     LOG: 'logs/setup.log',

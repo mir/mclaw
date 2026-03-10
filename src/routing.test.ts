@@ -8,88 +8,37 @@ beforeEach(() => {
   _setRegisteredGroups({});
 });
 
-// --- JID ownership patterns ---
-
-describe('JID ownership patterns', () => {
-  // These test the patterns that will become ownsJid() on the Channel interface
-
-  it('WhatsApp group JID: ends with @g.us', () => {
-    const jid = '12345678@g.us';
-    expect(jid.endsWith('@g.us')).toBe(true);
+describe('Telegram JID ownership patterns', () => {
+  it('matches direct chat JIDs', () => {
+    expect('tg:123456789'.startsWith('tg:')).toBe(true);
   });
 
-  it('WhatsApp DM JID: ends with @s.whatsapp.net', () => {
-    const jid = '12345678@s.whatsapp.net';
-    expect(jid.endsWith('@s.whatsapp.net')).toBe(true);
+  it('matches supergroup JIDs', () => {
+    expect('tg:-1001234567890'.startsWith('tg:')).toBe(true);
+  });
+
+  it('matches topic-qualified JIDs', () => {
+    expect('tg:-1001234567890:topic:7'.startsWith('tg:')).toBe(true);
   });
 });
 
-// --- getAvailableGroups ---
-
 describe('getAvailableGroups', () => {
-  it('returns only groups, excludes DMs', () => {
-    storeChatMetadata(
-      'group1@g.us',
-      '2024-01-01T00:00:01.000Z',
-      'Group 1',
-      'whatsapp',
-      true,
-    );
-    storeChatMetadata(
-      'user@s.whatsapp.net',
-      '2024-01-01T00:00:02.000Z',
-      'User DM',
-      'whatsapp',
-      false,
-    );
-    storeChatMetadata(
-      'group2@g.us',
-      '2024-01-01T00:00:03.000Z',
-      'Group 2',
-      'whatsapp',
-      true,
-    );
+  it('returns only Telegram groups, excludes DMs', () => {
+    storeChatMetadata('tg:-1001', '2024-01-01T00:00:01.000Z', 'Group 1', 'telegram', true);
+    storeChatMetadata('tg:42', '2024-01-01T00:00:02.000Z', 'Direct Chat', 'telegram', false);
+    storeChatMetadata('tg:-1002', '2024-01-01T00:00:03.000Z', 'Group 2', 'telegram', true);
 
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(2);
-    expect(groups.map((g) => g.jid)).toContain('group1@g.us');
-    expect(groups.map((g) => g.jid)).toContain('group2@g.us');
-    expect(groups.map((g) => g.jid)).not.toContain('user@s.whatsapp.net');
-  });
-
-  it('excludes __group_sync__ sentinel', () => {
-    storeChatMetadata('__group_sync__', '2024-01-01T00:00:00.000Z');
-    storeChatMetadata(
-      'group@g.us',
-      '2024-01-01T00:00:01.000Z',
-      'Group',
-      'whatsapp',
-      true,
-    );
-
-    const groups = getAvailableGroups();
-    expect(groups).toHaveLength(1);
-    expect(groups[0].jid).toBe('group@g.us');
+    expect(groups.map((g) => g.jid)).toEqual(['tg:-1002', 'tg:-1001']);
   });
 
   it('marks registered groups correctly', () => {
-    storeChatMetadata(
-      'reg@g.us',
-      '2024-01-01T00:00:01.000Z',
-      'Registered',
-      'whatsapp',
-      true,
-    );
-    storeChatMetadata(
-      'unreg@g.us',
-      '2024-01-01T00:00:02.000Z',
-      'Unregistered',
-      'whatsapp',
-      true,
-    );
+    storeChatMetadata('tg:-1001', '2024-01-01T00:00:01.000Z', 'Registered', 'telegram', true);
+    storeChatMetadata('tg:-1002', '2024-01-01T00:00:02.000Z', 'Unregistered', 'telegram', true);
 
     _setRegisteredGroups({
-      'reg@g.us': {
+      'tg:-1001': {
         name: 'Registered',
         folder: 'registered',
         trigger: '@Andy',
@@ -98,73 +47,39 @@ describe('getAvailableGroups', () => {
     });
 
     const groups = getAvailableGroups();
-    const reg = groups.find((g) => g.jid === 'reg@g.us');
-    const unreg = groups.find((g) => g.jid === 'unreg@g.us');
-
-    expect(reg?.isRegistered).toBe(true);
-    expect(unreg?.isRegistered).toBe(false);
+    expect(groups.find((g) => g.jid === 'tg:-1001')?.isRegistered).toBe(true);
+    expect(groups.find((g) => g.jid === 'tg:-1002')?.isRegistered).toBe(false);
   });
 
-  it('returns groups ordered by most recent activity', () => {
-    storeChatMetadata(
-      'old@g.us',
-      '2024-01-01T00:00:01.000Z',
-      'Old',
-      'whatsapp',
-      true,
-    );
-    storeChatMetadata(
-      'new@g.us',
-      '2024-01-01T00:00:05.000Z',
-      'New',
-      'whatsapp',
-      true,
-    );
-    storeChatMetadata(
-      'mid@g.us',
-      '2024-01-01T00:00:03.000Z',
-      'Mid',
-      'whatsapp',
-      true,
-    );
+  it('orders groups by most recent activity', () => {
+    storeChatMetadata('tg:-1001', '2024-01-01T00:00:01.000Z', 'Old', 'telegram', true);
+    storeChatMetadata('tg:-1003', '2024-01-01T00:00:05.000Z', 'New', 'telegram', true);
+    storeChatMetadata('tg:-1002', '2024-01-01T00:00:03.000Z', 'Mid', 'telegram', true);
 
     const groups = getAvailableGroups();
-    expect(groups[0].jid).toBe('new@g.us');
-    expect(groups[1].jid).toBe('mid@g.us');
-    expect(groups[2].jid).toBe('old@g.us');
+    expect(groups.map((g) => g.jid)).toEqual([
+      'tg:-1003',
+      'tg:-1002',
+      'tg:-1001',
+    ]);
   });
 
-  it('excludes non-group chats regardless of JID format', () => {
-    // Unknown JID format stored without is_group should not appear
+  it('includes topic-qualified Telegram chats', () => {
     storeChatMetadata(
-      'unknown-format-123',
+      'tg:-1001234567890:topic:7',
       '2024-01-01T00:00:01.000Z',
-      'Unknown',
-    );
-    // Explicitly non-group with unusual JID
-    storeChatMetadata(
-      'custom:abc',
-      '2024-01-01T00:00:02.000Z',
-      'Custom DM',
-      'custom',
-      false,
-    );
-    // A real group for contrast
-    storeChatMetadata(
-      'group@g.us',
-      '2024-01-01T00:00:03.000Z',
-      'Group',
-      'whatsapp',
+      'Topic Chat',
+      'telegram',
       true,
     );
 
     const groups = getAvailableGroups();
     expect(groups).toHaveLength(1);
-    expect(groups[0].jid).toBe('group@g.us');
+    expect(groups[0].jid).toBe('tg:-1001234567890:topic:7');
   });
 
-  it('returns empty array when no chats exist', () => {
-    const groups = getAvailableGroups();
-    expect(groups).toHaveLength(0);
+  it('leaves chat metadata queryable for debugging', () => {
+    storeChatMetadata('tg:-1001', '2024-01-01T00:00:01.000Z', 'Group', 'telegram', true);
+    expect(getAllChats()[0].channel).toBe('telegram');
   });
 });

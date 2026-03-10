@@ -13,13 +13,13 @@ import { AvailableGroup } from './container-runner.js';
 import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
+import { getParentTelegramJid } from './telegram-jid.js';
 import { RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
-  sendMessage: (jid: string, text: string) => Promise<void>;
+  sendMessage: (jid: string, text: string, options?: { buttons?: Array<Array<{ text: string; data: string }>> }) => Promise<void>;
   registeredGroups: () => Record<string, RegisteredGroup>;
   registerGroup: (jid: string, group: RegisteredGroup) => void;
-  syncGroupMetadata: (force: boolean) => Promise<void>;
   getAvailableGroups: () => AvailableGroup[];
   writeGroupsSnapshot: (
     groupFolder: string,
@@ -27,6 +27,13 @@ export interface IpcDeps {
     availableGroups: AvailableGroup[],
     registeredJids: Set<string>,
   ) => void;
+}
+
+export function resolveMessageTargetGroup(
+  registeredGroups: Record<string, RegisteredGroup>,
+  chatJid: string,
+): RegisteredGroup | undefined {
+  return registeredGroups[chatJid] ?? registeredGroups[getParentTelegramJid(chatJid)];
 }
 
 let ipcWatcherRunning = false;
@@ -74,12 +81,16 @@ export function startIpcWatcher(deps: IpcDeps): void {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
               if (data.type === 'message' && data.chatJid && data.text) {
                 // Authorization: verify this group can send to this chatJid
-                const targetGroup = registeredGroups[data.chatJid];
+                const targetGroup = resolveMessageTargetGroup(
+                  registeredGroups,
+                  data.chatJid,
+                );
                 if (
                   isMain ||
                   (targetGroup && targetGroup.folder === sourceGroup)
                 ) {
-                  await deps.sendMessage(data.chatJid, data.text);
+                  logger.info({ hasButtons: !!data.buttons, buttons: JSON.stringify(data.buttons) }, 'IPC message data debug');
+                  await deps.sendMessage(data.chatJid, data.text, { buttons: data.buttons });
                   logger.info(
                     { chatJid: data.chatJid, sourceGroup },
                     'IPC message sent',
@@ -321,30 +332,6 @@ export async function processTaskIpc(
             'Unauthorized task cancel attempt',
           );
         }
-      }
-      break;
-
-    case 'refresh_groups':
-      // Only main group can request a refresh
-      if (isMain) {
-        logger.info(
-          { sourceGroup },
-          'Group metadata refresh requested via IPC',
-        );
-        await deps.syncGroupMetadata(true);
-        // Write updated snapshot immediately
-        const availableGroups = deps.getAvailableGroups();
-        deps.writeGroupsSnapshot(
-          sourceGroup,
-          true,
-          availableGroups,
-          new Set(Object.keys(registeredGroups)),
-        );
-      } else {
-        logger.warn(
-          { sourceGroup },
-          'Unauthorized refresh_groups attempt blocked',
-        );
       }
       break;
 

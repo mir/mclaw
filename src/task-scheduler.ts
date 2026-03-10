@@ -9,10 +9,11 @@ import {
   TIMEZONE,
 } from './config.js';
 import {
-  ContainerOutput,
+  ContainerStreamEvent,
   runContainerAgent,
   writeTasksSnapshot,
 } from './container-runner.js';
+import { TelegramChannel } from './channels/telegram.js';
 import {
   getAllTasks,
   getDueTasks,
@@ -24,12 +25,14 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { logger } from './logger.js';
+import { TelegramStreamRenderer } from './telegram-stream-renderer.js';
 import { RegisteredGroup, ScheduledTask } from './types.js';
 
 export interface SchedulerDependencies {
   registeredGroups: () => Record<string, RegisteredGroup>;
   getSessions: () => Record<string, string>;
   queue: GroupQueue;
+  getTelegramChannel?: () => TelegramChannel | null;
   onProcess: (
     groupJid: string,
     proc: ChildProcess,
@@ -112,6 +115,10 @@ async function runTask(
 
   let result: string | null = null;
   let error: string | null = null;
+  const telegramChannel = deps.getTelegramChannel?.() ?? null;
+  const renderer = telegramChannel
+    ? new TelegramStreamRenderer(telegramChannel, task.chat_jid)
+    : null;
 
   // For group context mode, use the group's current session
   const sessions = deps.getSessions();
@@ -133,6 +140,7 @@ async function runTask(
   };
 
   try {
+    renderer?.start();
     const output = await runContainerAgent(
       group,
       {
@@ -146,18 +154,26 @@ async function runTask(
       },
       (proc, containerName) =>
         deps.onProcess(task.chat_jid, proc, containerName, task.group_folder),
-      async (streamedOutput: ContainerOutput) => {
-        if (streamedOutput.result) {
-          result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+      async (event: ContainerStreamEvent) => {
+        if (event.type === 'progress') {
+          renderer?.updateProgress(event.message);
+          return;
+        }
+        if (event.type === 'assistant_text') {
+          result = event.text;
+          renderer?.updateAnswer(event.text);
+          return;
+        }
+        if (event.type === 'turn_complete') {
+          if (event.result) {
+            result = event.result;
+            renderer?.updateAnswer(event.result);
+          }
+          deps.queue.notifyIdle(task.chat_jid);
           scheduleClose();
         }
-        if (streamedOutput.status === 'success') {
-          deps.queue.notifyIdle(task.chat_jid);
-        }
-        if (streamedOutput.status === 'error') {
-          error = streamedOutput.error || 'Unknown error';
+        if (event.type === 'error') {
+          error = event.error || 'Unknown error';
         }
       },
     );
@@ -166,9 +182,14 @@ async function runTask(
 
     if (output.status === 'error') {
       error = output.error || 'Unknown error';
-    } else if (output.result) {
-      // Messages are sent via MCP tool (IPC), result text is just logged
-      result = output.result;
+      await renderer?.finishError(error);
+    } else {
+      if (output.result) {
+        result = output.result;
+        renderer?.updateAnswer(output.result);
+      }
+      await renderer?.finishSuccess();
+      result = renderer?.getAnswerText() || result;
     }
 
     logger.info(
@@ -178,7 +199,10 @@ async function runTask(
   } catch (err) {
     if (closeTimer) clearTimeout(closeTimer);
     error = err instanceof Error ? err.message : String(err);
+    await renderer?.finishError(error);
     logger.error({ taskId: task.id, error }, 'Task failed');
+  } finally {
+    await renderer?.dispose();
   }
 
   const durationMs = Date.now() - startTime;

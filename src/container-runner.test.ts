@@ -85,7 +85,10 @@ vi.mock('child_process', async () => {
   };
 });
 
-import { runContainerAgent, ContainerOutput } from './container-runner.js';
+import {
+  runContainerAgent,
+  ContainerStreamEvent,
+} from './container-runner.js';
 import type { RegisteredGroup } from './types.js';
 
 const testGroup: RegisteredGroup = {
@@ -104,7 +107,7 @@ const testInput = {
 
 function emitOutputMarker(
   proc: ReturnType<typeof createFakeProcess>,
-  output: ContainerOutput,
+  output: ContainerStreamEvent,
 ) {
   const json = JSON.stringify(output);
   proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
@@ -131,9 +134,16 @@ describe('container-runner timeout behavior', () => {
 
     // Emit output with a result
     emitOutputMarker(fakeProc, {
-      status: 'success',
+      type: 'session_started',
+      sessionId: 'session-123',
+    });
+    emitOutputMarker(fakeProc, {
+      type: 'assistant_text',
+      text: 'Here is my response',
+    });
+    emitOutputMarker(fakeProc, {
+      type: 'turn_complete',
       result: 'Here is my response',
-      newSessionId: 'session-123',
     });
 
     // Let output processing settle
@@ -152,7 +162,7 @@ describe('container-runner timeout behavior', () => {
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-123');
     expect(onOutput).toHaveBeenCalledWith(
-      expect.objectContaining({ result: 'Here is my response' }),
+      expect.objectContaining({ type: 'assistant_text', text: 'Here is my response' }),
     );
   });
 
@@ -190,9 +200,21 @@ describe('container-runner timeout behavior', () => {
 
     // Emit output
     emitOutputMarker(fakeProc, {
-      status: 'success',
+      type: 'session_started',
+      sessionId: 'session-456',
+    });
+    emitOutputMarker(fakeProc, {
+      type: 'progress',
+      stage: 'tool',
+      message: 'Running Bash',
+    });
+    emitOutputMarker(fakeProc, {
+      type: 'assistant_text',
+      text: 'Done',
+    });
+    emitOutputMarker(fakeProc, {
+      type: 'turn_complete',
       result: 'Done',
-      newSessionId: 'session-456',
     });
 
     await vi.advanceTimersByTimeAsync(10);
@@ -205,5 +227,37 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('preserves streamed event ordering across multiple markers', async () => {
+    const onOutput = vi.fn(async () => {});
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      onOutput,
+    );
+
+    fakeProc.stdout.push(`${OUTPUT_START_MARKER}\n{"type":"progress","stage":"tool","message":"Running Bash"}\n`);
+    fakeProc.stdout.push(`${OUTPUT_END_MARKER}\n${OUTPUT_START_MARKER}\n{"type":"assistant_text","text":"Partial"}\n${OUTPUT_END_MARKER}\n`);
+    fakeProc.stdout.push(`${OUTPUT_START_MARKER}\n{"type":"turn_complete","result":"Partial"}\n${OUTPUT_END_MARKER}\n`);
+
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.status).toBe('success');
+    expect(result.result).toBe('Partial');
+    const eventTypes = onOutput.mock.calls.map((call) => {
+      const [event] = call as unknown as [ContainerStreamEvent];
+      return event.type;
+    });
+
+    expect(eventTypes).toEqual([
+      'progress',
+      'assistant_text',
+      'turn_complete',
+    ]);
   });
 });

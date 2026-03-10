@@ -8,7 +8,7 @@ import {
   getTaskById,
   setRegisteredGroup,
 } from './db.js';
-import { processTaskIpc, IpcDeps } from './ipc.js';
+import { processTaskIpc, IpcDeps, resolveMessageTargetGroup } from './ipc.js';
 import { RegisteredGroup } from './types.js';
 
 // Set up registered groups used across tests
@@ -58,7 +58,6 @@ beforeEach(() => {
       setRegisteredGroup(jid, group);
       // Mock the fs.mkdirSync that registerGroup does
     },
-    syncGroupMetadata: async () => {},
     getAvailableGroups: () => [],
     writeGroupsSnapshot: () => {},
   };
@@ -365,18 +364,16 @@ describe('register_group authorization', () => {
   });
 });
 
-// --- refresh_groups authorization ---
-
-describe('refresh_groups authorization', () => {
-  it('non-main group cannot trigger refresh', async () => {
-    // This should be silently blocked (no crash, no effect)
-    await processTaskIpc(
-      { type: 'refresh_groups' },
-      'other-group',
-      false,
-      deps,
-    );
-    // If we got here without error, the auth gate worked
+describe('unknown IPC task types', () => {
+  it('ignores removed refresh_groups requests without crashing', async () => {
+    await expect(
+      processTaskIpc(
+        { type: 'refresh_groups' },
+        'other-group',
+        false,
+        deps,
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -392,7 +389,7 @@ describe('IPC message authorization', () => {
     targetChatJid: string,
     registeredGroups: Record<string, RegisteredGroup>,
   ): boolean {
-    const targetGroup = registeredGroups[targetChatJid];
+    const targetGroup = resolveMessageTargetGroup(registeredGroups, targetChatJid);
     return isMain || (!!targetGroup && targetGroup.folder === sourceGroup);
   }
 
@@ -427,6 +424,42 @@ describe('IPC message authorization', () => {
     expect(isMessageAuthorized('main', true, 'unknown@g.us', groups)).toBe(
       true,
     );
+  });
+
+  it('non-main group can send to its own Telegram topic via parent registration', () => {
+    groups['tg:-100123'] = {
+      name: 'Telegram Group',
+      folder: 'other-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    };
+
+    expect(
+      isMessageAuthorized(
+        'other-group',
+        false,
+        'tg:-100123:topic:77',
+        groups,
+      ),
+    ).toBe(true);
+  });
+
+  it('non-main group cannot send to another groups Telegram topic via parent registration', () => {
+    groups['tg:-100999'] = {
+      name: 'Another Telegram Group',
+      folder: 'third-group',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    };
+
+    expect(
+      isMessageAuthorized(
+        'other-group',
+        false,
+        'tg:-100999:topic:77',
+        groups,
+      ),
+    ).toBe(false);
   });
 });
 

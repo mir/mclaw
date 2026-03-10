@@ -18,6 +18,7 @@ import fs from 'fs';
 import path from 'path';
 import { query, HookCallback, PreCompactHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
+import { ContainerStreamEvent } from './stream-events.js';
 
 interface ContainerInput {
   prompt: string;
@@ -28,13 +29,6 @@ interface ContainerInput {
   isScheduledTask?: boolean;
   assistantName?: string;
   secrets?: Record<string, string>;
-}
-
-interface ContainerOutput {
-  status: 'success' | 'error';
-  result: string | null;
-  newSessionId?: string;
-  error?: string;
 }
 
 interface SessionEntry {
@@ -108,7 +102,7 @@ async function readStdin(): Promise<string> {
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
-function writeOutput(output: ContainerOutput): void {
+function writeOutput(output: ContainerStreamEvent): void {
   console.log(OUTPUT_START_MARKER);
   console.log(JSON.stringify(output));
   console.log(OUTPUT_END_MARKER);
@@ -116,6 +110,13 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+function emitProgress(
+  stage: 'session' | 'tool' | 'task',
+  message: string,
+): void {
+  writeOutput({ type: 'progress', stage, message });
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -190,11 +191,21 @@ function createPreCompactHook(assistantName?: string): HookCallback {
 // be visible to commands Kit runs.
 const SECRET_ENV_VARS = ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
-function createSanitizeBashHook(): HookCallback {
-  return async (input, _toolUseId, _context) => {
-    const preInput = input as PreToolUseHookInput;
+function createProgressHooks(): {
+  preToolUse: HookCallback;
+  postToolUse: HookCallback;
+} {
+  const preToolUse: HookCallback = async (input, _toolUseId, _context) => {
+    const preInput = input as PreToolUseHookInput & {
+      tool_name?: string;
+      toolName?: string;
+    };
+    const toolName = getHookToolName(preInput);
+
+    emitProgress('tool', `Running ${toolName}`);
+
     const command = (preInput.tool_input as { command?: string })?.command;
-    if (!command) return {};
+    if (!command || toolName !== 'Bash') return {};
 
     const unsetPrefix = `unset ${SECRET_ENV_VARS.join(' ')} 2>/dev/null; `;
     return {
@@ -207,6 +218,21 @@ function createSanitizeBashHook(): HookCallback {
       },
     };
   };
+
+  const postToolUse: HookCallback = async (
+    input,
+    _toolUseId,
+    _context,
+  ) => {
+    const toolName = getHookToolName(input as Record<string, unknown>);
+    const suffix = hookIndicatesFailure(input as Record<string, unknown>)
+      ? 'failed'
+      : 'finished';
+    emitProgress('tool', `${capitalize(toolName)} ${suffix}`);
+    return {};
+  };
+
+  return { preToolUse, postToolUse };
 }
 
 function sanitizeFilename(summary: string): string {
@@ -388,8 +414,10 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
+  let lastAssistantText = '';
   let messageCount = 0;
   let resultCount = 0;
+  let emittedTurnComplete = false;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -413,6 +441,8 @@ async function runQuery(
   if (extraDirs.length > 0) {
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
+
+  const progressHooks = createProgressHooks();
 
   for await (const message of query({
     prompt: stream,
@@ -451,8 +481,9 @@ async function runQuery(
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
-        PreToolUse: [{ matcher: 'Bash', hooks: [createSanitizeBashHook()] }],
-      },
+        PreToolUse: [{ matcher: '*', hooks: [progressHooks.preToolUse] }],
+        PostToolUse: [{ matcher: '*', hooks: [progressHooks.postToolUse] }],
+      } as Record<string, unknown>,
     }
   })) {
     messageCount++;
@@ -466,26 +497,36 @@ async function runQuery(
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
       log(`Session initialized: ${newSessionId}`);
+      writeOutput({ type: 'session_started', sessionId: newSessionId });
     }
 
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
       const tn = message as { task_id: string; status: string; summary: string };
       log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+      emitProgress('task', tn.summary || `Task ${tn.task_id} ${tn.status}`);
+    }
+
+    if (message.type === 'assistant') {
+      const assistantText = extractAssistantText(message);
+      if (assistantText && assistantText !== lastAssistantText) {
+        lastAssistantText = assistantText;
+        writeOutput({ type: 'assistant_text', text: assistantText });
+      }
     }
 
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
       log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
-      writeOutput({
-        status: 'success',
-        result: textResult || null,
-        newSessionId
-      });
+      emittedTurnComplete = true;
+      writeOutput({ type: 'turn_complete', result: textResult || lastAssistantText || null });
     }
   }
 
   ipcPolling = false;
+  if (!emittedTurnComplete) {
+    writeOutput({ type: 'turn_complete', result: lastAssistantText || null });
+  }
   log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
@@ -501,9 +542,8 @@ async function main(): Promise<void> {
     log(`Received input for group: ${containerInput.groupFolder}`);
   } catch (err) {
     writeOutput({
-      status: 'error',
-      result: null,
-      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`
+      type: 'error',
+      error: `Failed to parse input: ${err instanceof Error ? err.message : String(err)}`,
     });
     process.exit(1);
   }
@@ -557,9 +597,6 @@ async function main(): Promise<void> {
         break;
       }
 
-      // Emit session update so host can track it
-      writeOutput({ status: 'success', result: null, newSessionId: sessionId });
-
       log('Query ended, waiting for next IPC message...');
 
       // Wait for the next message or _close sentinel
@@ -575,14 +612,53 @@ async function main(): Promise<void> {
   } catch (err) {
     const errorMessage = err instanceof Error ? err.message : String(err);
     log(`Agent error: ${errorMessage}`);
-    writeOutput({
-      status: 'error',
-      result: null,
-      newSessionId: sessionId,
-      error: errorMessage
-    });
+    writeOutput({ type: 'error', error: errorMessage });
     process.exit(1);
   }
 }
 
 main();
+
+function getHookToolName(input: Record<string, unknown>): string {
+  const toolName = input.tool_name || input.toolName;
+  return typeof toolName === 'string' && toolName.trim()
+    ? toolName
+    : 'tool';
+}
+
+function hookIndicatesFailure(input: Record<string, unknown>): boolean {
+  if (typeof input.error === 'string' && input.error) return true;
+  const output = input.tool_output;
+  if (!output || typeof output !== 'object') return false;
+  const flags = output as { is_error?: boolean; isError?: boolean };
+  return flags.is_error === true || flags.isError === true;
+}
+
+function capitalize(value: string): string {
+  if (!value) return value;
+  return value[0].toUpperCase() + value.slice(1);
+}
+
+function extractAssistantText(message: unknown): string {
+  const candidate = message as {
+    message?: { content?: unknown };
+    content?: unknown;
+  };
+  return extractTextParts(candidate.message?.content ?? candidate.content).trim();
+}
+
+function extractTextParts(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+
+  return content
+    .filter((part) => part && typeof part === 'object')
+    .map((part) => {
+      const textPart = part as { type?: string; text?: string };
+      if (textPart.type !== 'text' || typeof textPart.text !== 'string') {
+        return '';
+      }
+      return textPart.text;
+    })
+    .join('');
+}

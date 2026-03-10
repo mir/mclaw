@@ -2,122 +2,43 @@
 
 ## Trust Model
 
-| Entity | Trust Level | Rationale |
-|--------|-------------|-----------|
-| Main group | Trusted | Private self-chat, admin control |
-| Non-main groups | Untrusted | Other users may be malicious |
-| Container agents | Sandboxed | Isolated execution environment |
-| WhatsApp messages | User input | Potential prompt injection |
+| Entity | Trust Level | Notes |
+|--------|-------------|-------|
+| Main group | Trusted | Admin control channel |
+| Non-main groups | Untrusted | User input may be malicious |
+| Telegram messages | Untrusted input | Potential prompt injection |
+| Container agents | Sandboxed | Restricted to explicit mounts |
 
-## Security Boundaries
+## Primary Boundary
 
-### 1. Container Isolation (Primary Boundary)
+The container runtime is the real security boundary.
 
-Agents execute in containers (lightweight Linux VMs), providing:
-- **Process isolation** - Container processes cannot affect the host
-- **Filesystem isolation** - Only explicitly mounted directories are visible
-- **Non-root execution** - Runs as unprivileged `node` user (uid 1000)
-- **Ephemeral containers** - Fresh environment per invocation (`--rm`)
+- agents run in isolated Linux containers
+- the project root is mounted read-only
+- group directories are mounted separately
+- mount permissions come from an external allowlist
 
-This is the primary security boundary. Rather than relying on application-level permission checks, the attack surface is limited by what's mounted.
+## Data Protection
 
-### 2. Mount Security
+- SQLite and runtime state stay on the host
+- the Telegram bot token stays in `.env` on the host
+- only filtered Claude auth variables are mounted into containers
+- mount allowlist lives outside the repo and is never mounted into containers
 
-**External Allowlist** - Mount permissions stored at `~/.config/nanoclaw/mount-allowlist.json`, which is:
-- Outside project root
-- Never mounted into containers
-- Cannot be modified by agents
+## Group Isolation
 
-**Default Blocked Patterns:**
-```
-.ssh, .gnupg, .aws, .azure, .gcloud, .kube, .docker,
-credentials, .env, .netrc, .npmrc, id_rsa, id_ed25519,
-private_key, .secret
-```
+- each registered group has its own folder
+- each group gets its own agent session state
+- non-main groups cannot send IPC commands on behalf of other groups
 
-**Protections:**
-- Symlink resolution before validation (prevents traversal attacks)
-- Container path validation (rejects `..` and absolute paths)
-- `nonMainReadOnly` option forces read-only for non-main groups
+## Telegram-Specific Notes
 
-**Read-Only Project Root:**
+- only chats the bot has already seen are discoverable
+- `/chatid` is the fallback path for explicit registration
+- topics are isolated by topic-qualified JIDs
 
-The main group's project root is mounted read-only. Writable paths the agent needs (group folder, IPC, `.claude/`) are mounted separately. This prevents the agent from modifying host application code (`src/`, `dist/`, `package.json`, etc.) which would bypass the sandbox entirely on next restart.
+## Residual Risks
 
-### 3. Session Isolation
-
-Each group has isolated Claude sessions at `data/sessions/{group}/.claude/`:
-- Groups cannot see other groups' conversation history
-- Session data includes full message history and file contents read
-- Prevents cross-group information disclosure
-
-### 4. IPC Authorization
-
-Messages and task operations are verified against group identity:
-
-| Operation | Main Group | Non-Main Group |
-|-----------|------------|----------------|
-| Send message to own chat | ✓ | ✓ |
-| Send message to other chats | ✓ | ✗ |
-| Schedule task for self | ✓ | ✓ |
-| Schedule task for others | ✓ | ✗ |
-| View all tasks | ✓ | Own only |
-| Manage other groups | ✓ | ✗ |
-
-### 5. Credential Handling
-
-**Mounted Credentials:**
-- Claude auth tokens (filtered from `.env`, read-only)
-
-**NOT Mounted:**
-- WhatsApp session (`store/auth/`) - host only
-- Mount allowlist - external, never mounted
-- Any credentials matching blocked patterns
-
-**Credential Filtering:**
-Only these environment variables are exposed to containers:
-```typescript
-const allowedVars = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY'];
-```
-
-> **Note:** Anthropic credentials are mounted so that Claude Code can authenticate when the agent runs. However, this means the agent itself can discover these credentials via Bash or file operations. Ideally, Claude Code would authenticate without exposing credentials to the agent's execution environment, but I couldn't figure this out. **PRs welcome** if you have ideas for credential isolation.
-
-## Privilege Comparison
-
-| Capability | Main Group | Non-Main Group |
-|------------|------------|----------------|
-| Project root access | `/workspace/project` (ro) | None |
-| Group folder | `/workspace/group` (rw) | `/workspace/group` (rw) |
-| Global memory | Implicit via project | `/workspace/global` (ro) |
-| Additional mounts | Configurable | Read-only unless allowed |
-| Network access | Unrestricted | Unrestricted |
-| MCP tools | All | All |
-
-## Security Architecture Diagram
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        UNTRUSTED ZONE                             │
-│  WhatsApp Messages (potentially malicious)                        │
-└────────────────────────────────┬─────────────────────────────────┘
-                                 │
-                                 ▼ Trigger check, input escaping
-┌──────────────────────────────────────────────────────────────────┐
-│                     HOST PROCESS (TRUSTED)                        │
-│  • Message routing                                                │
-│  • IPC authorization                                              │
-│  • Mount validation (external allowlist)                          │
-│  • Container lifecycle                                            │
-│  • Credential filtering                                           │
-└────────────────────────────────┬─────────────────────────────────┘
-                                 │
-                                 ▼ Explicit mounts only
-┌──────────────────────────────────────────────────────────────────┐
-│                CONTAINER (ISOLATED/SANDBOXED)                     │
-│  • Agent execution                                                │
-│  • Bash commands (sandboxed)                                      │
-│  • File operations (limited to mounts)                            │
-│  • Network access (unrestricted)                                  │
-│  • Cannot modify security config                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
+- agents can still misuse any host path you explicitly mount
+- outbound network access is not restricted by default
+- anyone able to message a registered group can still attempt prompt injection

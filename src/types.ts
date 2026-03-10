@@ -78,10 +78,14 @@ export interface TaskRunLog {
 
 // --- Channel abstraction ---
 
+export interface SendMessageOptions {
+  buttons?: Array<Array<{ text: string; data: string }>>;
+}
+
 export interface Channel {
   name: string;
   connect(): Promise<void>;
-  sendMessage(jid: string, text: string): Promise<void>;
+  sendMessage(jid: string, text: string, options?: SendMessageOptions): Promise<void>;
   isConnected(): boolean;
   ownsJid(jid: string): boolean;
   disconnect(): Promise<void>;
@@ -93,8 +97,7 @@ export interface Channel {
 export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
 
 // Callback for chat metadata discovery.
-// name is optional — channels that deliver names inline (Telegram) pass it here;
-// channels that sync names separately (WhatsApp syncGroupMetadata) omit it.
+// name is optional because some channels may not have a display name yet.
 export type OnChatMetadata = (
   chatJid: string,
   timestamp: string,

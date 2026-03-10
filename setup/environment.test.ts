@@ -45,7 +45,7 @@ describe('registered groups DB query', () => {
       `INSERT INTO registered_groups (jid, name, folder, trigger_pattern, added_at, requires_trigger)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(
-      '123@g.us',
+      'tg:-100123',
       'Group 1',
       'group-1',
       '@Andy',
@@ -57,7 +57,7 @@ describe('registered groups DB query', () => {
       `INSERT INTO registered_groups (jid, name, folder, trigger_pattern, added_at, requires_trigger)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(
-      '456@g.us',
+      'tg:-100456',
       'Group 2',
       'group-2',
       '@Andy',
@@ -104,18 +104,21 @@ describe('Docker detection logic', () => {
   });
 });
 
-describe('WhatsApp auth detection', () => {
-  it('detects non-empty auth directory logic', () => {
-    // Simulate the check: directory exists and has files
-    const hasAuth = (authDir: string) => {
-      try {
-        return fs.existsSync(authDir) && fs.readdirSync(authDir).length > 0;
-      } catch {
-        return false;
-      }
-    };
+describe('Telegram token detection', () => {
+  it('detects TELEGRAM_BOT_TOKEN in env content', () => {
+    const content = 'TELEGRAM_BOT_TOKEN=123:abc\nASSISTANT_NAME=Andy';
+    const hasTelegramBotToken = /(^|\n)\s*TELEGRAM_BOT_TOKEN=.+/m.test(content);
+    expect(hasTelegramBotToken).toBe(true);
+  });
 
-    // Non-existent directory
-    expect(hasAuth('/tmp/nonexistent_auth_dir_xyz')).toBe(false);
+  it('returns false when TELEGRAM_BOT_TOKEN is missing or empty', () => {
+    expect(
+      /(^|\n)\s*TELEGRAM_BOT_TOKEN=.+/m.test(
+        'ASSISTANT_NAME=Andy\nTELEGRAM_BOT_TOKEN=',
+      ),
+    ).toBe(false);
+    expect(
+      /(^|\n)\s*TELEGRAM_BOT_TOKEN=.+/m.test('ASSISTANT_NAME=Andy'),
+    ).toBe(false);
   });
 });
